@@ -184,7 +184,22 @@ The fix is in the **BIOS**, not in this repo: set *Primary Display* (also called
 
 The firmware is fine — it is rendering to the BMC, which is why you can see POST, the BIOS setup and an OS installer. The handover happens later: with two VGA devices present, **the OS or hypervisor picks which one carries its console**, and it picked the other one.
 
-No BIOS change will help here, because the BIOS is already doing the right thing. On a general-purpose Linux the console device can be steered with kernel command-line parameters; on ESXi there is no supported knob for it — the practical answers are to redirect the console to **serial** ([SOL](#sol-serial-over-lan--the-text-console), below) or to manage the host over the network and use the KVM for firmware screens only.
+No BIOS change will help here, because the BIOS is already doing the right thing.
+
+On a general-purpose Linux the console device can be steered with kernel command-line parameters. **On ESXi it cannot** — verified on 6.7 U3, the only VGA-related kernel settings are these, and none of them selects a device:
+
+```
+$ esxcli system settings kernel list
+vga              Bool    Enable/Disable S/VGA support.
+vga64            Bool    Use 64K VGA aperture.
+SVGAScaling      uint8   Pixel scaling factor for SVGA console
+smallFontForTTY  Bool    Use 50-line font for tty.
+logOnScreen      Bool    Display vmkernel log on screen.
+```
+
+You can turn the console off, not move it. And note the `Configured` / `Runtime` columns that command prints: kernel settings apply **at boot**, because the vmkernel binds its console to a PCI device while initialising the display. A running kernel's console cannot be re-pointed at another card, so there is no live fix to reach for.
+
+The practical answers are to redirect the console to **serial** ([SOL](#sol-serial-over-lan--the-text-console), below), or to manage the host over the network and use the KVM for the firmware screens.
 
 **Which is not the limitation it sounds like.** Firmware screens are exactly what a remote console is *for*: BIOS setup, boot order, a bootable ISO over virtual media, a host that will not boot. All of that renders to the BMC in this case, and all of it is unreachable by SSH.
 
