@@ -1,175 +1,216 @@
-# Remote console (KVM)
+# megarac-jviewer-kvm
 
-The BMC (ASUS ASMB8-iKVM, ASPEED AST2400, AMI MegaRAC, firmware 1.14) ships only
-a **Java (JViewer) remote console**, delivered as a `.jnlp` via Java Web Start --
-a mechanism removed from modern JREs -- and its last firmware (1.14.51, 2017)
-never added an HTML5 console. So the console cannot be opened from a current
-desktop without help.
+> Get the **Java (JViewer) remote console** of a legacy **AMI MegaRAC** BMC working again — in your **browser, over noVNC, with no Java installed locally**. Verified on an **ASUS ASMB8-iKVM** (ASPEED **AST2400**, firmware 1.14).
 
-The approach below runs the legacy viewer inside a container and serves it to
-your browser over noVNC. **It works**, but only after three firmware quirks are
-worked around. They are worth reading before touching anything, because each one
-fails in a way that points somewhere else entirely.
+![noVNC](https://img.shields.io/badge/console-noVNC-2E7D32)
+![BMC](https://img.shields.io/badge/BMC-AMI%20MegaRAC-informational)
+![ASPEED](https://img.shields.io/badge/ASPEED-AST2400-informational)
+![License](https://img.shields.io/badge/license-MIT-green)
 
-## The three quirks
+---
 
-### 1. The launch file needs two query parameters
+## Is this your problem?
 
-`Java/jviewer.jnlp` on its own returns an error page where the launch arguments
-should be. Both parameters are mandatory:
+Your server's IPMI web UI offers a **"Remote Control → Console Redirection"** button. It downloads a `jviewer.jnlp` file. Then one of these happens:
 
-```
-Java/jviewer.jnlp?EXTRNIP=<bmc-ip>&JNLPSTR=JViewer
-```
+| Symptom | Cause | Fixed by |
+|---|---|---|
+| Nothing launches; your OS has no idea what a `.jnlp` is | **Java Web Start was removed** from modern JREs (dropped in Java 11) | running the viewer in a container (below) |
+| `Fatal: Read Error: Could not read or parse the JNLP file` (IcedTea-Web) | the BMC returned an **error page** instead of launch arguments | [quirk 1](#quirk-1--the-launch-file-needs-two-query-parameters) |
+| The file body reads `Unable to find JNLP String` | same as above | [quirk 1](#quirk-1--the-launch-file-needs-two-query-parameters) |
+| The viewer opens but sits at **`Connection in progress`** forever | the KVM stream is **not on port 7578** — the BMC is in single-port mode | [quirk 2](#quirk-2--the-kvm-stream-runs-on-port-80-not-7578) |
+| `java.lang.NullPointerException` from netx before anything is drawn | the launch file has **no `main-class`** | [quirk 3](#quirk-3--the-launch-file-has-no-main-class) |
+| The BMC's HTTPS side refuses to negotiate (`TLS 1.0`, `RC4-MD5`) | no current JRE will speak that | [quirk 2](#quirk-2--the-kvm-stream-runs-on-port-80-not-7578) — talk HTTP instead |
+| The console connects but the screen stays **black** | the transport is fine; the BMC has no video to capture | [Black console](#a-black-console-is-a-different-problem) |
 
-* `JNLPSTR=JViewer` -- without it the body reads *"Unable to find JNLP String"*.
-* `EXTRNIP` -- copied **verbatim** into JViewer's `-hostname` argument. It must
-  be the BMC's own address. Point it at the client by mistake and the BMC
-  cheerfully builds a launch file telling the viewer to connect to the client.
+If you recognise two or more of those, you are in the right place.
 
-The response also declares `Content-Length: 4134` while sending ~3154 bytes. The
-document is nevertheless **complete** (`</application-desc></jnlp>`); only the
-header is wrong. An HTTP client that treats a short read as fatal will discard a
-perfectly good file -- read the partial body instead
-(`http.client.IncompleteRead.partial`).
+## What this is
 
-### 2. The KVM stream runs on port 80, not 7578
+[`nojava-ipmi-kvm`](https://github.com/sciapp/nojava-ipmi-kvm) already does the hard structural work: it runs an old JRE + IcedTea-Web inside a container, logs into your BMC, launches the Java viewer there, and serves the result to your browser over noVNC. Nothing to install on your desktop.
 
-This BMC runs in **single-port mode** (`-singleportenabled 1`). Video redirection
-and virtual media are multiplexed onto the **web server port**. Ports
-7578/7582/5120/5123 answer with TCP RST and are never used, even though the
-*Configuration -> Services* page still lists them:
+On this firmware generation it still cannot reach the host's video, because of **three firmware quirks**. This repo supplies:
 
-```
-2  kvm  Active  both  7578  7582  1800  4  View
-```
+* **`megarac-patch/`** — a small Docker layer over the upstream image that patches its `get_java_viewer` to work around all three (and fails loudly instead of hanging when the BMC misbehaves).
+* **`nojava-ipmi-kvmrc.example.yaml`** — a working configuration for this BMC family.
+* **This README** — the *why*. Each quirk fails in a way that points somewhere else entirely, so the diagnosis is worth more than the patch.
 
-That display is the stored configuration; single-port mode overrides it. A viewer
-aimed at 7578 sits at *"Connection in progress"* forever, which reads like an
-authentication or privilege problem and is neither.
+**Scope, honestly stated:** this is a *workaround wrapper*, not a clean-room KVM client. It still runs AMI's Java viewer — just somewhere you don't have to care about it. If you want a native reimplementation, see [Related work](#related-work).
 
-Which port the BMC hands out depends on **the scheme of the session that asked**:
+---
 
-| Login over | `-kvmsecure` | `-kvmport` |
-|------------|--------------|------------|
-| HTTPS      | `1`          | `443`      |
-| HTTP       | `0`          | `80`       |
+## Quick start
 
-The BMC's HTTPS side only negotiates **TLS 1.0 + RC4-MD5**, which no current JRE
-will do -- so asking over HTTPS hands the viewer a transport it cannot open. The
-BMC serves its **entire web UI in the clear on port 80** with no redirect, so
-asking over HTTP yields a plaintext video stream and the TLS problem disappears.
-`megarac-patch` therefore forces the container to speak HTTP.
-
-### 3. The launch file has no `main-class`
-
-The firmware emits a bare `<application-desc>` and relies on the jar manifest
-(which does carry `Main-Class: com.ami.kvm.jviewer.JViewer`). This netx build
-does not cope, and dies with a `NullPointerException` before JViewer's `main()`
-runs. The patch injects the attribute. It also repairs the
-`codebase="http://(null):80/Java"` the firmware emits, without which the jars
-cannot be resolved.
-
-## Usage
-
-### 1. Install (pinned)
+### 1. Install the launcher (pinned — both pins matter)
 
 ```sh
-# Python 3.13, NOT 3.14 (3.14 breaks the tool's asyncio.get_event_loop()).
-# Pin 0.9.2: 0.9.3 has no matching image on Docker Hub.
+# Python 3.13, NOT 3.14 — 3.14 breaks the tool's asyncio.get_event_loop() usage.
+# Pin 0.9.2 — 0.9.3 has no matching image on Docker Hub.
 pipx install --python python3.13 nojava-ipmi-kvm==0.9.2
-cp console/nojava-ipmi-kvmrc.example.yaml ~/.nojava-ipmi-kvmrc.yaml
 ```
-
-Set `login_user` to your BMC account and keep the `EXTRNIP` in
-`download_endpoint` in sync with `full_hostname`. The password is prompted at
-runtime and never written to disk.
 
 ### 2. Build the patched image
 
-Tagged as the image nojava expects, so it is used locally without a re-pull:
+Tag it as the image `nojava-ipmi-kvm` expects, so it is used locally without re-pulling over it:
 
 ```sh
+git clone https://github.com/Dordouille/megarac-jviewer-kvm.git
+cd megarac-jviewer-kvm
 docker build --platform linux/amd64 \
-  -t sciapp/nojava-ipmi-kvm:v0.9.2-openjdk-7 console/megarac-patch
+  -t sciapp/nojava-ipmi-kvm:v0.9.2-openjdk-7 megarac-patch
 ```
 
-The patch is idempotent -- rebuilding on top of an already-patched image
-replaces its own block rather than stacking onto it.
+`--platform linux/amd64` is required on Apple Silicon and other ARM hosts — the base image is amd64-only. The patch is **idempotent**: rebuilding over an already-patched image replaces its own block rather than stacking onto it.
 
-### 3. Run
+### 3. Configure
 
 ```sh
-nojava-ipmi-kvm --debug myserver      # prompts for the BMC password
+cp nojava-ipmi-kvmrc.example.yaml ~/.nojava-ipmi-kvmrc.yaml
 ```
 
-Then open the `http://localhost:<port>/vnc.html?...` URL it prints. Keep the
-terminal open: it holds the container, and closing stdin is read as "shut down".
+Then edit it — three fields, and they must agree:
 
-To verify the video transport really came up, rather than trusting the window:
+| Field | Set it to |
+|---|---|
+| `full_hostname` | your **BMC's** IP or hostname (not the host OS, not a VM) |
+| `download_endpoint` | the same IP inside `EXTRNIP=` — **keep it in sync** |
+| `login_user` | your BMC account |
+
+The password is prompted at runtime and never written to disk.
+
+### 4. Run
+
+```sh
+nojava-ipmi-kvm --debug myserver
+```
+
+Open the `http://localhost:<port>/vnc.html?…` URL it prints. **Keep the terminal open** — it holds the container, and closing stdin is read as "shut down".
+
+### 5. Verify the video transport actually came up
+
+Rather than trusting the window:
 
 ```sh
 docker exec <container> netstat -tn | grep :80    # expect ESTABLISHED to the BMC
 ```
 
-## Operational notes
+An `ESTABLISHED` connection to the BMC on **port 80** means the stream is live. Nothing there means you are still stuck on [quirk 2](#quirk-2--the-kvm-stream-runs-on-port-80-not-7578).
 
-**The MegaRAC web server is fragile.** It allows roughly 4-5 concurrent web
-sessions and leaks them on each failed console attempt. Once exhausted it still
-*accepts* TCP in ~0.00 s but never answers HTTP, while IPMI keeps replying
-normally -- a combination that looks like a network fault and is not. Recover
-with a BMC-only cold reset (does **not** touch the host, ~1-2 min):
+---
 
-```sh
-ipmitool -I lanplus -H 192.0.2.10 -U <user> -f <passwordfile> mc reset cold
+## The three quirks
+
+### Quirk 1 — the launch file needs two query parameters
+
+`Java/jviewer.jnlp` on its own returns an error page where the launch arguments should be. Both parameters are mandatory:
+
+```
+Java/jviewer.jnlp?EXTRNIP=<bmc-ip>&JNLPSTR=JViewer
 ```
 
-Keep failed attempts few, and log out (`rpc/logout.asp`) when scripting against
-the BMC.
+* **`JNLPSTR=JViewer`** — without it the body reads *"Unable to find JNLP String"*.
+* **`EXTRNIP`** — copied **verbatim** into JViewer's `-hostname` argument. It must be the **BMC's own address**. Point it at the client by mistake and the BMC cheerfully builds a launch file telling the viewer to connect to the client.
 
-**The BMC has SSH** (port 22, OpenSSH 6.0p1, RSA/DSS host keys only) giving a
-restricted SMASH-CLP shell:
+The response also declares `Content-Length: 4134` while sending ~3154 bytes. The document is nevertheless **complete** (it ends in `</application-desc></jnlp>`); only the header is wrong. An HTTP client that treats a short read as fatal will discard a perfectly good file — read the partial body instead (`http.client.IncompleteRead.partial`).
+
+### Quirk 2 — the KVM stream runs on port 80, not 7578
+
+This BMC runs in **single-port mode** (`-singleportenabled 1`). Video redirection and virtual media are multiplexed onto the **web server port**. Ports 7578 / 7582 / 5120 / 5123 answer with TCP RST and are never used — even though *Configuration → Services* still lists them:
+
+```
+2  kvm  Active  both  7578  7582  1800  4  View
+```
+
+That display is the *stored configuration*; single-port mode overrides it. A viewer aimed at 7578 sits at *"Connection in progress"* forever, which reads like an authentication or privilege problem and is neither.
+
+Which port the BMC hands out depends on **the scheme of the session that asked**:
+
+| Login over | `-kvmsecure` | `-kvmport` |
+|---|---|---|
+| HTTPS | `1` | `443` |
+| HTTP | `0` | `80` |
+
+The BMC's HTTPS side only negotiates **TLS 1.0 + RC4-MD5**, which no current JRE will do — so asking over HTTPS hands the viewer a transport it cannot open. The BMC serves its **entire web UI in the clear on port 80** with no redirect, so asking over HTTP yields a plaintext video stream and the TLS problem disappears. `megarac-patch` therefore forces the container to speak HTTP.
+
+> **Security note.** This means the console stream — keystrokes included — crosses the network **unencrypted**. That is a property of the firmware, not a choice this repo makes for you: its HTTPS is TLS 1.0/RC4, which is not meaningfully better. Treat the BMC as what it is — a device that belongs on an **isolated management VLAN**, reached over a VPN, never exposed to a routable network.
+
+### Quirk 3 — the launch file has no `main-class`
+
+The firmware emits a bare `<application-desc>` and relies on the jar manifest (which does carry `Main-Class: com.ami.kvm.jviewer.JViewer`). This netx build does not cope, and dies with a `NullPointerException` before JViewer's `main()` runs. The patch injects the attribute.
+
+It also repairs the `codebase="http://(null):80/Java"` the firmware emits, without which the jars cannot be resolved.
+
+---
+
+## Operational notes
+
+### The MegaRAC web server is fragile — read this before you retry
+
+It allows roughly **4–5 concurrent web sessions** and **leaks one on each failed console attempt**. Once exhausted it still *accepts* TCP in ~0.00 s but never answers HTTP, while IPMI keeps replying normally — a combination that looks exactly like a network fault and is not.
+
+Recover with a **BMC-only cold reset**. This does **not** touch the running host; it takes 1–2 minutes:
+
+```sh
+ipmitool -I lanplus -H <bmc-ip> -U <user> -f <passwordfile> mc reset cold
+```
+
+So: keep failed attempts few, and log out (`rpc/logout.asp`) when scripting against the BMC.
+
+### A black console is a different problem
+
+If the viewer connects (traffic settles to a trickle of keep-alives) but the screen is black, the **transport is fine** — the BMC simply has no video to capture. The AST2400 only captures the onboard VGA it is attached to. On a board where a discrete GPU sits at a lower PCI bus number, the firmware may have made that card the primary display, in which case nothing is ever rendered to the ASPEED.
+
+### The BMC also has SSH
+
+Port 22, OpenSSH 6.0p1, RSA/DSS host keys only — a restricted SMASH-CLP shell:
 
 ```sh
 ssh -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa \
     -o KexAlgorithms=+diffie-hellman-group1-sha1 -o Ciphers=+aes128-cbc \
-    <user>@192.0.2.10
+    <user>@<bmc-ip>
 ```
 
-Open TCP ports on the BMC: 22, 80, 427, 443, 555, 623, 5988, 5989.
+Open TCP ports observed on this BMC: 22, 80, 427, 443, 555, 623, 5988, 5989.
 
-**A black console is a separate problem.** If the viewer connects (traffic settles
-to a trickle of keep-alives) but the screen is black, the transport is fine and
-the BMC simply has no video to capture -- the AST2400 only captures the onboard
-VGA it is attached to. On a board where a discrete GPU sits at a lower PCI bus
-number, the firmware may have made that card the primary display, in which case
-nothing is ever rendered to the ASPEED.
+---
 
-## SOL (Serial-over-LAN), text console
+## SOL (Serial-over-LAN) — the text console
 
-A lightweight text console (BIOS + OS, when serial redirection is enabled in the
-BIOS), straight from `ipmitool`:
+If you only need BIOS and OS text — and serial redirection is enabled in the BIOS — you need none of the above:
 
 ```sh
-ipmitool -I lanplus -H 192.0.2.10 -U admin -E sol activate     # ~. to exit
-ipmitool -I lanplus -H 192.0.2.10 -U admin -E sol deactivate   # if stuck
+ipmitool -I lanplus -H <bmc-ip> -U admin -E sol activate     # ~. to exit
+ipmitool -I lanplus -H <bmc-ip> -U admin -E sol deactivate   # if it gets stuck
 ```
 
-SOL is an interactive stream, so it lives here as a documented command rather
-than an MCP tool -- the request/response tool model does not fit a live console.
-The server still exposes `sol info` (read-only) to check SOL configuration.
+`-E` reads the password from the `IPMI_PASSWORD` environment variable, keeping it off the process list.
 
-## Why not a firmware update, Redfish, or a native client
+---
 
-The AST2400/ASMB8 generation never received an HTML5 iKVM (that arrived with the
-AST2500/ASMB9 boards), and its Redfish support is absent or too limited to drive
-a console. Flashing the 2017 beta firmware would add neither.
+## Why not a firmware update, Redfish, or a native client?
 
-If you would rather drop Java altogether, the protocol has been reimplemented
-clean-room: [`rd450x-console`](https://github.com/BadCoder1337/rd450x-console) is
-a single Go binary that speaks IVTP, decodes the ASPEED VQ+JPEG video codec and
-serves noVNC itself. It targets a newer MegaRAC (firmware 2.36) over TLS on 7582,
-so it would need adapting to single-port-over-80 before it could talk to this
-BMC -- but its `docs/kvm-protocol.md` is the best available description of the
-wire format. (`mcxBMCView` is not applicable: it drives the HTML5 SPA that this
-firmware generation does not have.)
+* **Firmware.** The AST2400 / ASMB8 generation never received an HTML5 iKVM — that arrived with the AST2500 / ASMB9 boards. The last firmware for this one (1.14.51, 2017) adds nothing here.
+* **Redfish.** Absent or too limited on this generation to drive a console.
+* **Native client.** It exists, but not for this firmware — see below.
+
+## Related work
+
+* [`sciapp/nojava-ipmi-kvm`](https://github.com/sciapp/nojava-ipmi-kvm) — the upstream launcher this builds on. Use it directly if your BMC is *not* a single-port MegaRAC.
+* [`BadCoder1337/rd450x-console`](https://github.com/BadCoder1337/rd450x-console) — a clean-room reimplementation: a single Go binary that speaks IVTP, decodes the ASPEED VQ+JPEG video codec and serves noVNC itself, **no Java at all**. It targets a newer MegaRAC (firmware 2.36) over TLS on 7582, so it would need adapting to single-port-over-80 before it could talk to this BMC — but its `docs/kvm-protocol.md` is the best available description of the wire format.
+* `mcxBMCView` — **not** applicable: it drives the HTML5 SPA that this firmware generation does not have.
+* [`ipmi-mcp`](https://github.com/Dordouille/ipmi-mcp) — sibling project: an MCP server that drives the same BMC over IPMI (power, sensors, event log) from an AI assistant, behind a fail-safe approval gate.
+
+## Hardware this was verified on
+
+| | |
+|---|---|
+| Board | ASUS, with the ASMB8-iKVM module |
+| BMC chip | ASPEED AST2400 |
+| Firmware stack | AMI MegaRAC 1.14 |
+| Mode | single-port (`-singleportenabled 1`) |
+
+Other AMI MegaRAC BMCs of the same era (Supermicro, Tyan, ASRock Rack…) are likely to behave the same way, but are untested. Reports welcome — open an issue with your board, BMC chip and firmware version.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

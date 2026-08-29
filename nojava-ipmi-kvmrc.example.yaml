@@ -13,7 +13,7 @@ hosts:
   myserver:
     based_on: kvm-asmb8
     # The BMC itself -- the physical host's management controller, not a VM.
-    full_hostname: 192.0.2.10
+    full_hostname: 192.0.2.10          # <-- your BMC address
 
 templates:
   kvm-asmb8:

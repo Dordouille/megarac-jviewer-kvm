@@ -1,0 +1,12 @@
+# Local config (may hold your BMC address / account)
+.nojava-ipmi-kvmrc.yaml
+nojava-ipmi-kvmrc.yaml
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]

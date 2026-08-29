@@ -11,7 +11,7 @@
 # without pulling over it:
 #
 #   docker build --platform linux/amd64 \
-#     -t sciapp/nojava-ipmi-kvm:v0.9.2-openjdk-7 console/megarac-patch
+#     -t sciapp/nojava-ipmi-kvm:v0.9.2-openjdk-7 megarac-patch
 #
 # The patch is idempotent, so rebuilding on top of an already-built image is
 # safe -- it replaces its own previous block rather than stacking onto it.
