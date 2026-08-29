@@ -7,6 +7,10 @@
 ![ASPEED](https://img.shields.io/badge/ASPEED-AST2400-informational)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
+![The JViewer console running over noVNC, showing an ESXi host's console screen](docs/kvm-console.png)
+
+*The revived Java console, in a browser. The **Media** and **Power** menus are live — virtual media and power control work, not just video. Host address and hostname are masked.*
+
 ---
 
 ## Is this your problem?
