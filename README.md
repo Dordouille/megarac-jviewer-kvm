@@ -158,7 +158,25 @@ So: keep failed attempts few, and log out (`rpc/logout.asp`) when scripting agai
 
 ### A black console is a different problem
 
-If the viewer connects (traffic settles to a trickle of keep-alives) but the screen is black, the **transport is fine** — the BMC simply has no video to capture. The AST2400 only captures the onboard VGA it is attached to. On a board where a discrete GPU sits at a lower PCI bus number, the firmware may have made that card the primary display, in which case nothing is ever rendered to the ASPEED.
+If the viewer connects (traffic settles to a trickle of keep-alives) but the screen stays black, the **transport is fine** — the BMC simply has no video to capture. The AST2400 only digitises the onboard VGA it is wired to. If a discrete GPU sits at a **lower PCI bus number**, the firmware likely made *that* card the primary display, and nothing is ever rendered to the ASPEED.
+
+Check the bus numbers before you suspect the console. Two VGA-class devices, the add-in card first:
+
+```
+$ lspci | grep VGA                          # on Linux
+01:00.0 VGA compatible controller: NVIDIA Corporation TU102 [GeForce RTX 2080 Ti]
+08:00.0 VGA compatible controller: ASPEED Technology, Inc. ASPEED Graphics Family
+
+$ esxcli hardware pci list                  # on ESXi — look for Device Class Name
+   Address: 0000:01:00.0   Device Class Name: VGA compatible controller
+   Address: 0000:08:00.0   Device Class Name: VGA compatible controller
+```
+
+Bus `01` beats bus `08`, so the discrete card wins and the console shows black.
+
+The fix is in the **BIOS**, not here: set *Primary Display* (sometimes *Onboard VGA*, *VGA Priority*, or *Primary Video Adapter*) to the **onboard / IGD** device rather than *Auto* or *PCIE*. It takes a reboot, so it is worth doing while you are already restarting for something else.
+
+Useful to know meanwhile: **POST, the BIOS and an OS installer usually still render to the ASPEED**, because the handover happens later. So a black screen once the OS is up does not mean the console is broken — reboot the machine and you will see the console light up for the firmware screens.
 
 ### The BMC also has SSH
 
