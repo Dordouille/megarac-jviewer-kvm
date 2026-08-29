@@ -158,11 +158,13 @@ So: keep failed attempts few, and log out (`rpc/logout.asp`) when scripting agai
 
 ### A black console is a different problem
 
-If the viewer connects — traffic settles to a trickle of keep-alives — but the screen stays black, the **transport is fine**. The BMC simply has no video to capture. The AST2400 only digitises the onboard VGA it is wired to, so if something else is driving the display, nothing reaches it.
+If the viewer connects — traffic settles to a trickle of keep-alives — but the screen stays black, the **transport is fine**. The BMC simply has nothing to show you. The AST2400 only digitises the onboard VGA it is wired to, so anything that takes the display elsewhere leaves the console blank.
 
-**Which something else depends on when the screen goes black**, and the two cases have different causes and different fixes.
+Two situations get confused with a broken console. Neither is one.
 
-First, confirm you actually have two VGA-class devices, and note their **PCI bus numbers**:
+#### The firmware never gave the BMC the display
+
+Black from power-on onwards — no POST, no BIOS, nothing, ever. The firmware elected a **discrete graphics card** as primary display, commonly the one at the lower PCI bus number:
 
 ```
 $ lspci | grep VGA                          # on Linux
@@ -174,34 +176,22 @@ $ esxcli hardware pci list                  # on ESXi — look for Device Class 
    Address: 0000:08:00.0   Device Class Name: VGA compatible controller
 ```
 
-#### Black the whole way through, POST included
+The fix is in the **BIOS**: set *Primary Display* (also called *Onboard VGA*, *VGA Priority*, or *Primary Video Adapter*) to the **onboard / IGD** device instead of *Auto* or *PCIE*. It needs a reboot.
 
-The **firmware** elected the discrete card as primary display — commonly the one at the lower PCI bus number. The BMC never sees a thing, from power-on onwards.
+If the BMC *does* own the display, the console stays up indefinitely — on the reference host it renders the ESXi console for hours on end.
 
-The fix is in the **BIOS**, not in this repo: set *Primary Display* (also called *Onboard VGA*, *VGA Priority*, or *Primary Video Adapter*) to the **onboard / IGD** device instead of *Auto* or *PCIE*. It needs a reboot.
+#### A passthrough VM took the graphics card
 
-#### POST and BIOS visible, black once the OS boots
+This one is not about the BMC console at all, but it is the black screen people most often report on a virtualisation host, so it is worth naming.
 
-The firmware is fine — it is rendering to the BMC, which is why you can see POST, the BIOS setup and an OS installer. The handover happens later: with two VGA devices present, **the OS or hypervisor picks which one carries its console**, and it picked the other one.
+Watch a **monitor plugged into the discrete GPU** while a hypervisor with PCI passthrough boots, and you see:
 
-No BIOS change will help here, because the BIOS is already doing the right thing.
+1. POST and BIOS — the firmware is driving the card;
+2. the hypervisor starting up — still the host;
+3. **the screen goes dark** — a guest VM with that GPU in passthrough has just autostarted and claimed the card;
+4. the **guest's** operating system appears.
 
-On a general-purpose Linux the console device can be steered with kernel command-line parameters. **On ESXi it cannot** — verified on 6.7 U3, the only VGA-related kernel settings are these, and none of them selects a device:
-
-```
-$ esxcli system settings kernel list
-vga              Bool    Enable/Disable S/VGA support.
-vga64            Bool    Use 64K VGA aperture.
-SVGAScaling      uint8   Pixel scaling factor for SVGA console
-smallFontForTTY  Bool    Use 50-line font for tty.
-logOnScreen      Bool    Display vmkernel log on screen.
-```
-
-You can turn the console off, not move it. And note the `Configured` / `Runtime` columns that command prints: kernel settings apply **at boot**, because the vmkernel binds its console to a PCI device while initialising the display. A running kernel's console cannot be re-pointed at another card, so there is no live fix to reach for.
-
-The practical answers are to redirect the console to **serial** ([SOL](#sol-serial-over-lan--the-text-console), below), or to manage the host over the network and use the KVM for the firmware screens.
-
-**Which is not the limitation it sounds like.** Firmware screens are exactly what a remote console is *for*: BIOS setup, boot order, a bootable ISO over virtual media, a host that will not boot. All of that renders to the BMC in this case, and all of it is unreachable by SSH.
+Step 3 looks like a crash or a lost signal, and is neither: the host simply handed the hardware over. Nothing is wrong, and nothing about the BMC console changed — the two displays are independent. If you want the *host's* console at that point, that is exactly what the BMC console is for.
 
 ### The BMC also has SSH
 
