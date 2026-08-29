@@ -158,9 +158,11 @@ So: keep failed attempts few, and log out (`rpc/logout.asp`) when scripting agai
 
 ### A black console is a different problem
 
-If the viewer connects (traffic settles to a trickle of keep-alives) but the screen stays black, the **transport is fine** — the BMC simply has no video to capture. The AST2400 only digitises the onboard VGA it is wired to. If a discrete GPU sits at a **lower PCI bus number**, the firmware likely made *that* card the primary display, and nothing is ever rendered to the ASPEED.
+If the viewer connects — traffic settles to a trickle of keep-alives — but the screen stays black, the **transport is fine**. The BMC simply has no video to capture. The AST2400 only digitises the onboard VGA it is wired to, so if something else is driving the display, nothing reaches it.
 
-Check the bus numbers before you suspect the console. Two VGA-class devices, the add-in card first:
+**Which something else depends on when the screen goes black**, and the two cases have different causes and different fixes.
+
+First, confirm you actually have two VGA-class devices, and note their **PCI bus numbers**:
 
 ```
 $ lspci | grep VGA                          # on Linux
@@ -172,11 +174,19 @@ $ esxcli hardware pci list                  # on ESXi — look for Device Class 
    Address: 0000:08:00.0   Device Class Name: VGA compatible controller
 ```
 
-Bus `01` beats bus `08`, so the discrete card wins and the console shows black.
+#### Black the whole way through, POST included
 
-The fix is in the **BIOS**, not here: set *Primary Display* (sometimes *Onboard VGA*, *VGA Priority*, or *Primary Video Adapter*) to the **onboard / IGD** device rather than *Auto* or *PCIE*. It takes a reboot, so it is worth doing while you are already restarting for something else.
+The **firmware** elected the discrete card as primary display — commonly the one at the lower PCI bus number. The BMC never sees a thing, from power-on onwards.
 
-Useful to know meanwhile: **POST, the BIOS and an OS installer usually still render to the ASPEED**, because the handover happens later. So a black screen once the OS is up does not mean the console is broken — reboot the machine and you will see the console light up for the firmware screens.
+The fix is in the **BIOS**, not in this repo: set *Primary Display* (also called *Onboard VGA*, *VGA Priority*, or *Primary Video Adapter*) to the **onboard / IGD** device instead of *Auto* or *PCIE*. It needs a reboot.
+
+#### POST and BIOS visible, black once the OS boots
+
+The firmware is fine — it is rendering to the BMC, which is why you can see POST, the BIOS setup and an OS installer. The handover happens later: with two VGA devices present, **the OS or hypervisor picks which one carries its console**, and it picked the other one.
+
+No BIOS change will help here, because the BIOS is already doing the right thing. On a general-purpose Linux the console device can be steered with kernel command-line parameters; on ESXi there is no supported knob for it — the practical answers are to redirect the console to **serial** ([SOL](#sol-serial-over-lan--the-text-console), below) or to manage the host over the network and use the KVM for firmware screens only.
+
+**Which is not the limitation it sounds like.** Firmware screens are exactly what a remote console is *for*: BIOS setup, boot order, a bootable ISO over virtual media, a host that will not boot. All of that renders to the BMC in this case, and all of it is unreachable by SSH.
 
 ### The BMC also has SSH
 
